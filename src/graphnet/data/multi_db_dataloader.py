@@ -1,5 +1,117 @@
-import collections, numbers
-from typing import Any, Dict
+import collections, numbers, sqlite3
+from typing import Any, Dict, List, Tuple
+
+
+import numpy as np
+import pandas as pd
+
+import torch
+
+from sklearn.model_selection import train_test_split
+from graphnet.data.dataloader import DataLoader
+from graphnet.data.dataset import SQLiteDataset, EnsembleDataset
+from graphnet.training.labels import Direction, Label
+
+
+from torch_geometric.data import Data
+
+# Define some database variables/tables
+TRUTH_TABLE = "truth" # Table containing particle truth
+PULSEMAP_TABLE = "SRTInIcePulses"
+INDEX_COLUMN = "event_no" # Name of column specifying event indices (e.g. event number)
+
+# Flags for indicating train/val/test subsamples
+TRAIN_LABEL = 0
+VAL_LABEL = 1
+TEST_LABEL = 2
+
+
+def get_db_variable(
+    database: str, 
+    table_name: str, 
+    var_name: str,
+):
+    """
+    Get variable from table
+    """
+    print("**MM debug-- db: ", database)
+    print("**MM debug-- table: ", table_name)
+    print("**MM debug-- var: ", var_name)
+    with sqlite3.connect(database) as conn:
+        query = f'SELECT {var_name} FROM {table_name}'
+        arr = pd.read_sql(query,conn)[var_name].ravel()
+        assert arr.ndim == 1
+        return arr
+
+
+
+def get_all_event_nos(
+    database: str, 
+    table: str = TRUTH_TABLE, 
+):
+    """Return all event ids in database.
+
+    Args:
+        database: path to database.
+        table: name of table to extract event numbers from (generally "truth").
+
+    Returns:
+        A list of all event ids.
+    """
+    return get_db_variable(database, table, INDEX_COLUMN).astype(int)
+
+
+def train_val_test_split(
+    selection: List[int],
+    test_size: float = 0.10,
+    val_size: float = 0.10, 
+    seed: int = 42) -> Tuple[List[int], List[int], List[int]]:
+    """Partition a list of event numbers into train, validation and test sets.
+
+    Args:
+        selection: A list of event ids to partition
+        seed: seed used for shuffling.
+
+    Returns:
+        A set of event ids for training, validation and test.
+    """
+    assert val_size + test_size < 1.0
+
+    rng = np.random.RandomState(seed=seed)
+
+    # Split all events into a training set and a val+test set.
+    train_selection, tmp_selection = train_test_split(selection,
+                                                        test_size=val_size + test_size, 
+                                                        random_state=rng)
+
+    # Split the val+test set into validation and test
+    val_selection, test_selection = train_test_split(tmp_selection,
+                                                        test_size=(test_size/(test_size + val_size)), 
+                                                        random_state=rng)
+    
+    # Sanity Checks
+    assert len(train_selection) > len(val_selection) + len(test_selection)
+
+    set_ratio = len(test_selection)/(len(test_selection) + len(val_selection))
+    given_ratio = test_size/(test_size + val_size)
+    assert np.isclose(set_ratio, given_ratio, atol=1e-2)
+
+    return train_selection, val_selection, test_selection
+
+class SubSampleLabel(Label):
+    """
+    Label for indicating whether events are in the train/val/test subsamples (or indeed any subsample)
+    """
+
+    def __init__(self, subsample):
+        super().__init__(key="subsample")
+        self.subsample = subsample
+
+
+    def __call__(self, graph: Data) -> torch.tensor:
+        label = torch.tensor(self.subsample, dtype=torch.short)
+        return label
+
 
 def construct_dataloaders(
     dataset_kwargs: Dict[str, Any],
@@ -58,9 +170,6 @@ def construct_dataloaders(
     val_sets = []
     test_sets = []
 
-    # Init subsaple definitions that we will pass back for storing
-    event_subsamples = collections.OrderedDict()
-
     # Loop over databases
     for k, database in enumerate(databases):
 
@@ -75,23 +184,50 @@ def construct_dataloaders(
         train_selection, val_selection, test_selection = None, None, None
 
 
+        # Get all event numbers
+        event_nos = get_all_event_nos(
+            database = database,
+            table = dataset_kwargs['truth_table'],
+        )
+
+        # Get the event numbers in the pulse map table. There is one row per pulse, so in generally multiple 
+        # instances of the same event number since there are normally multiple pulses per event.
+        pulsemap_event_nos = get_all_event_nos(
+            database = database,
+            table = PULSEMAP_TABLE,
+        )
+
+        # Check there are no events present in the pulsemap table that are not present in the truth table
+        assert all(np.in1d(pulsemap_event_nos, event_nos)), "Found events in the pulsemap table but not the truth table!?!"
+
         #
-        # Get events from predefined list
+        # Split events in train/val/test
         #
 
-        assert database in event_defs
+        # Now divide event numbers into the train/val/test sets
+        selection = event_nos.tolist()
+        train_selection, val_selection, test_selection = train_val_test_split(
+            selection = selection,
+            test_size= test_size[k],
+            val_size = val_size[k], 
+            seed = seed,
+        )
 
-        # Load the selections
-        train_selection = event_subsamples[database]["train"]
-        val_selection = event_subsamples[database]["val"]
-        test_selection = event_subsamples[database]["test"]
+        # Truncate to max num events, if requested
+        # Doing this after train/val/test split, since want the split to be reproducible even if change the number of events we want to use
+        # Note that this means the train/val/test fractions might not be perfect
+        if num_train_events[k] is not None :
+            if logger is not None :
+                logger.info(f"Truncating to {num_train_events[k]} training events")
 
-        # Apply max num events, if specified
-        if max_num_events is not None :
-            train_selection = train_selection[:max_num_events]
-            val_selection = val_selection[:max_num_events]
-            test_selection = test_selection[:max_num_events]
 
+
+            #TODO val/test num events is wrong.....
+
+
+            train_selection = train_selection[:num_train_events[k]]
+            val_selection = val_selection[:int(val_size[k]*num_train_events[k])]
+            test_selection = test_selection[:int(test_size[k]*num_train_events[k])]
 
 
         # Check event selection has been performed
@@ -196,4 +332,4 @@ def construct_dataloaders(
         **data_loader_common_kw
     )
 
-    return train_dataloader, val_dataloader, test_dataloader, event_subsamples
+    return train_dataloader, val_dataloader, test_dataloader
