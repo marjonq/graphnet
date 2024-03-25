@@ -114,6 +114,9 @@ class I3GRECOAstroExtractor(I3Extractor):
             "CascadeFilter_13": padding_value,
             "MuonFilter_13": padding_value,
             "OnlineL2Filter_17": padding_value,
+            "Pegleg_fit_zenith": padding_value,
+            "Pegleg_fit_azimuth": padding_value,
+            "Pegleg_fit_energy": padding_value,
         }
 
         # Only InIceSplit P frames contain ML appropriate I3RecoPulseSeriesMap etc.
@@ -168,6 +171,12 @@ class I3GRECOAstroExtractor(I3Extractor):
                     padding_value,
                 )
 
+            (
+                pegleg_fit_energy,
+                pegleg_fit_zenith,
+                pegleg_fit_azimuth
+            ) = self._get_Pegleg_fit_energy_zenith_azimuth(frame)
+
             output.update(
                 {
                     "energy": MCInIcePrimary.energy,
@@ -185,6 +194,10 @@ class I3GRECOAstroExtractor(I3Extractor):
                     "energy_track": energy_track,
                     "energy_cascade": energy_cascade,
                     "inelasticity": inelasticity,
+                    "Pegleg_fit_energy" : pegleg_fit_energy,
+                    "Pegleg_fit_zenith" : pegleg_fit_zenith,
+                    "Pegleg_fit_azimuth" : pegleg_fit_azimuth,
+                    "Pegleg_time" : pegleg_time,
                 }
             )
             if abs(output["pid"]) == 13:
@@ -390,6 +403,30 @@ class I3GRECOAstroExtractor(I3Extractor):
         inelasticity = 1.0 - energy_track / energy_total
 
         return energy_track, energy_cascade, inelasticity
+
+    def _get_Pegleg_fit_energy_zenith_azimuth(
+            self,
+            frame: "icetray.I3Frame",
+    ) -> Tuple[float, float, float]:
+        """Get Pegleg fit energy and direction for comparison.
+        
+        Args:
+            frame: Physics frame containing MC record.
+            
+        Returns: 
+            Tuple containing the fit energy and zenith and azimuth angles from the Pegleg reco
+        """
+        try: 
+            pegleg_fit_energy = frame['Pegleg_Fit_NestleTrack'].energy + \
+                                frame['Pegleg_Fit_NestleHDCasc'].energy
+            pegleg_fit_zenith = frame['Pegleg_Fit_NestleTrack'].dir.zenith
+            pegleg_fit_azimuth = frame['Pegleg_Fit_NestleTrack'].dir.azimuth
+        except:
+            pegleg_fit_energy = -888.888 #If I set it to null, I get an error downstream
+            pegleg_fit_zenith = -888.888 #If I set it to null, I get an error downstream
+            pegleg_fit_azimuth = -888.888 #If I set it to null, I get an error downstream
+
+        return pegleg_fit_energy, pegleg_fit_zenith, pegleg_fit_azimuth
 
     # Utility methods
     def _find_data_type(self, mc: bool, input_file: str) -> str:

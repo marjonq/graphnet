@@ -53,6 +53,11 @@ class TRUTH:
         "stopped_muon",
     ]
     DEEPCORE = ICECUBE86
+    DEEPCORE_PEGLEG = DEEPCORE + [
+        "Pegleg_fit_energy",
+        "Pegleg_fit_zenith",
+        "Pegleg_fit_azimuth",
+    ]
     UPGRADE = DEEPCORE
     PROMETHEUS = [
         "injection_energy",
